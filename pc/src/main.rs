@@ -70,6 +70,12 @@ fn main() -> windows::core::Result<()> {
             "не удалось зарегистрировать имя программы для медиаплашки: {error}"
         ));
     }
+    if cfg!(not(debug_assertions))
+        && autostart::is_enabled()
+        && let Err(error) = autostart::set(true)
+    {
+        log(format!("не удалось обновить автозапуск: {error}"));
+    }
 
     let (events, rx) = mpsc::channel();
     let pairing = Arc::new(AtomicBool::new(std::env::args().any(|arg| arg == "--pair")));
@@ -253,8 +259,11 @@ pub fn log(message: impl AsRef<str>) {
         let mut file = File::create(path).ok()?;
         let _ = writeln!(
             file,
-            "Phone Media, журнал за {:02}.{:02}.{}",
-            now.wDay, now.wMonth, now.wYear
+            "Phone Media {}, журнал за {:02}.{:02}.{}",
+            env!("CARGO_PKG_VERSION"),
+            now.wDay,
+            now.wMonth,
+            now.wYear
         );
         Some(Mutex::new(file))
     });

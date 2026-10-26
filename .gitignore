@@ -7,3 +7,5 @@
 /android/local.properties
 .idea/
 *.iml
+/dist/
+/android/signing/
