@@ -18,8 +18,8 @@ android {
         applicationId = "com.crosbic.phonemedia"
         minSdk = 30
         targetSdk = 37
-        versionCode = 10100
-        versionName = "1.1"
+        versionCode = 10200
+        versionName = "1.2"
         val updateUrl = project.findProperty("updateUrl") as String?
         manifestPlaceholders["updateUrl"] = updateUrl.orEmpty()
         manifestPlaceholders["cleartext"] = updateUrl != null
