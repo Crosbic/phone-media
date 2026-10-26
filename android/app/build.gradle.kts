@@ -18,8 +18,8 @@ android {
         applicationId = "com.crosbic.phonemedia"
         minSdk = 30
         targetSdk = 37
-        versionCode = 10000
-        versionName = "1.0"
+        versionCode = 10100
+        versionName = "1.1"
     }
 
     buildFeatures {
