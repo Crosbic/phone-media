@@ -30,8 +30,10 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -141,9 +143,8 @@ fun PhoneMediaApp(setup: Setup, actions: SetupActions, onForget: (Pc) -> Unit) {
     val request = AppState.pairingRequest
     when {
         request != null -> PairingScreen(request)
-        !setup.done -> SetupScreen(setup, actions)
         showLog -> LogScreen(onBack = { showLog = false })
-        else -> MainScreen(onForget = onForget, onOpenLog = { showLog = true })
+        else -> MainScreen(setup, actions, onForget = onForget, onOpenLog = { showLog = true })
     }
 }
 
@@ -207,18 +208,14 @@ private fun AppMark(size: Dp) {
 }
 
 @Composable
-private fun MainScreen(onForget: (Pc) -> Unit, onOpenLog: () -> Unit) {
+private fun MainScreen(setup: Setup, actions: SetupActions, onForget: (Pc) -> Unit, onOpenLog: () -> Unit) {
     var forgetting by remember { mutableStateOf<Pc?>(null) }
     val connected = AppState.connectedPcs
     Screen(title = "Phone Media", brand = true) {
+        if (!setup.done) PermissionsSection(setup, actions)
         ConnectionCard(connected)
         NowPlayingCard(AppState.nowPlaying, connected = connected.isNotEmpty())
-        Text(
-            text = "Компьютеры",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(start = 4.dp, top = 8.dp),
-        )
+        SectionTitle("Компьютеры")
         val paired = AppState.pairedPcs
         if (paired.isEmpty()) {
             Text(
@@ -232,6 +229,7 @@ private fun MainScreen(onForget: (Pc) -> Unit, onOpenLog: () -> Unit) {
         paired.forEach { pc ->
             PcCard(pc, online = connected.any { it.id == pc.id }, onForget = { forgetting = pc })
         }
+        if (setup.done) PermissionsSection(setup, actions)
         Spacer(Modifier.height(4.dp))
         Card(onClick = onOpenLog, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
             Row(
@@ -394,79 +392,76 @@ private fun PcCard(pc: Pc, online: Boolean, onForget: () -> Unit) {
     }
 }
 
-private class Step(val title: String, val description: String, val done: Boolean, val grant: () -> Unit)
+@Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+    )
+}
 
 @Composable
-private fun SetupScreen(setup: Setup, actions: SetupActions) {
-    val steps = listOf(
-        Step("Доступ к уведомлениям", "Так Android показывает приложению плееры", setup.listener, actions.grantListener),
-        Step("Локальная сеть", "Чтобы компьютер нашёл телефон", setup.network, actions.grantNetwork),
-        Step("Работа в фоне", "Чтобы связь не рвалась, когда телефон спит", setup.battery, actions.grantBattery),
-    )
-    val current = steps.indexOfFirst { !it.done }
-    Screen(title = "Настройка", brand = true) {
+private fun PermissionsSection(setup: Setup, actions: SetupActions) {
+    SectionTitle(if (setup.done) "Разрешения" else "Нужны разрешения")
+    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        PermissionRow("Доступ к уведомлениям", "Так Android показывает приложению плееры", setup.listener, actions.grantListener)
+        PermissionDivider()
+        PermissionRow("Локальная сеть", "Чтобы компьютер нашёл телефон", setup.network, actions.grantNetwork)
+        PermissionDivider()
+        PermissionRow("Работа в фоне", "Чтобы связь не рвалась, когда телефон спит", setup.battery, actions.grantBattery)
+    }
+    if (!setup.listener) {
         Text(
-            text = "Три разрешения — и музыка с телефона появится в Windows.",
-            style = MaterialTheme.typography.bodyLarge,
+            text = "Если переключатель доступа к уведомлениям серый: Настройки → Приложения → Phone Media → ⋮ → " +
+                "Разрешить ограниченные настройки.",
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
         )
-        steps.forEachIndexed { index, step -> StepCard(index + 1, step, current = index == current) }
-        if (current == 0) {
-            Text(
-                text = "Если переключатель серый: Настройки → Приложения → Phone Media → ⋮ → " +
-                    "Разрешить ограниченные настройки.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 4.dp),
-            )
-        }
     }
 }
 
 @Composable
-private fun StepCard(number: Int, step: Step, current: Boolean) {
-    val container = if (current) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainer
-    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = container)) {
-        Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Box(
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(
-                            when {
-                                step.done -> MaterialTheme.colorScheme.primary
-                                current -> MaterialTheme.colorScheme.primaryContainer
-                                else -> MaterialTheme.colorScheme.surfaceVariant
-                            },
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (step.done) {
-                        Icon(Icons.Filled.Check, contentDescription = "Готово", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(18.dp))
-                    } else {
-                        Text(
-                            text = "$number",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (current) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = step.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (step.done || current) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(step.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            if (current) {
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = step.grant, modifier = Modifier.align(Alignment.End)) { Text("Разрешить") }
-            }
+private fun PermissionDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(horizontal = 16.dp),
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+    )
+}
+
+@Composable
+private fun PermissionRow(title: String, description: String, granted: Boolean, grant: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(if (granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.errorContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (granted) Icons.Filled.Check else Icons.Filled.PriorityHigh,
+                contentDescription = null,
+                tint = if (granted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(18.dp),
+            )
         }
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                text = if (granted) "Включено" else "Выключено",
+                style = MaterialTheme.typography.labelMedium,
+                color = if (granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+            )
+        }
+        if (!granted) FilledTonalButton(onClick = grant) { Text("Включить") }
     }
 }
 
