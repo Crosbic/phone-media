@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-use crate::{Event, autostart, log, log_path};
+use crate::{Event, autostart, log, log_path, update};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_REFRESH: u32 = WM_APP + 2;
@@ -267,6 +267,11 @@ fn show_menu(window: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, COMMAND_UPDATE, w!("Проверить обновления"));
         let _ = AppendMenuW(menu, MF_STRING, COMMAND_LOG, w!("Открыть журнал"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let about = format!(
+            "Phone Media {} · © 2026 Crosbic · GNU GPL v3",
+            update::VERSION
+        );
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &HSTRING::from(about));
         let _ = AppendMenuW(menu, MF_STRING, COMMAND_QUIT, w!("Выход"));
 
         let mut cursor = POINT::default();

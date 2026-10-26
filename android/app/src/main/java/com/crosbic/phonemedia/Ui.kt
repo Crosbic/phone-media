@@ -8,6 +8,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -62,6 +63,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -496,7 +498,21 @@ private fun AboutRow(state: UpdateState, updates: UpdateActions) {
         }
         TextButton(onClick = updates.check, enabled = !busy) { Text("Проверить обновления") }
     }
+    val uriHandler = LocalUriHandler.current
+    Column(Modifier.fillMaxWidth().padding(start = 4.dp)) {
+        Text(
+            text = "© 2026 Crosbic. Свободная программа под лицензией GNU GPL v3, без каких-либо гарантий.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton(
+            onClick = { uriHandler.openUri(SOURCE_URL) },
+            contentPadding = PaddingValues(horizontal = 0.dp),
+        ) { Text("Исходный код и лицензия") }
+    }
 }
+
+private const val SOURCE_URL = "https://github.com/Crosbic/phone-media"
 
 @Composable
 private fun SectionTitle(text: String) {
