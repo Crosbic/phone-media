@@ -12,9 +12,10 @@
     </queries>
 
     <application
-        android:icon="@android:drawable/ic_media_play"
+        android:icon="@mipmap/ic_launcher"
         android:label="Phone Media"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.PhoneMedia">
 
         <activity
             android:name=".MainActivity"

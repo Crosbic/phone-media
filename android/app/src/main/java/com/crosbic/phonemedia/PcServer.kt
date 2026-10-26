@@ -11,6 +11,7 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -30,7 +31,7 @@ class PcServer(
     @Volatile private var udp: DatagramSocket? = null
     @Volatile private var server: ServerSocket? = null
     private val sockets = CopyOnWriteArraySet<Socket>()
-    private val clients = CopyOnWriteArraySet<Socket>()
+    private val clients = ConcurrentHashMap<Socket, Pc>()
     private val connections = mutableListOf<Connection>()
 
     init {
@@ -47,8 +48,8 @@ class PcServer(
         sender.execute { write(line) }
     }
 
-    fun disconnectAll() {
-        sockets.forEach { it.close() }
+    fun disconnect(pcId: String) {
+        clients.filterValues { it.id == pcId }.keys.forEach { it.close() }
     }
 
     fun stop() {
@@ -56,8 +57,9 @@ class PcServer(
         if (active === this) active = null
         udp?.close()
         server?.close()
-        disconnectAll()
+        sockets.forEach { it.close() }
         sender.shutdownNow()
+        main.post { AppState.connectedPcs = emptyList() }
     }
 
     private fun answerDiscovery() {
@@ -101,7 +103,8 @@ class PcServer(
             if (!handshake.run()) return
             pc.soTimeout = 0
 
-            clients.add(pc)
+            clients[pc] = Pc(handshake.pcId, handshake.pcName)
+            publishConnected()
             sender.execute { connections.add(Connection(pc, writer)) }
             main.post {
                 MediaLog.add("ПК подключился: ${handshake.pcName} ($address)")
@@ -120,8 +123,16 @@ class PcServer(
             pc.close()
             sockets.remove(pc)
             if (running) sender.execute { connections.removeAll { it.socket === pc } }
-            if (clients.remove(pc)) log("ПК отключился: $address")
+            if (clients.remove(pc) != null) {
+                log("ПК отключился: $address")
+                publishConnected()
+            }
         }
+    }
+
+    private fun publishConnected() {
+        val pcs = clients.values.distinctBy { it.id }.sortedBy { it.name }
+        main.post { if (running) AppState.connectedPcs = pcs }
     }
 
     private fun write(line: String) {

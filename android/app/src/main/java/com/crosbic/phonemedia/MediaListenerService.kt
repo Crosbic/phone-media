@@ -35,7 +35,10 @@ class MediaListenerService : NotificationListenerService() {
 
     private var pc: PcServer? = null
     private val main = Handler(Looper.getMainLooper())
-    private val syncRunnable = Runnable { syncPc() }
+    private val syncRunnable = Runnable {
+        publishNowPlaying()
+        syncPc()
+    }
     private var sentPlayer: String? = null
     private var sentArt: Bitmap? = null
     private var artSent = false
@@ -58,6 +61,7 @@ class MediaListenerService : NotificationListenerService() {
         tracked.values.forEach { it.controller.unregisterCallback(it.callback) }
         tracked.clear()
         order = emptyList()
+        AppState.nowPlaying = null
         MediaLog.add("доступ к уведомлениям отключён")
     }
 
@@ -122,6 +126,21 @@ class MediaListenerService : NotificationListenerService() {
         sentArt = null
         artSent = false
         syncPc()
+    }
+
+    private fun publishNowPlaying() {
+        val controller = mainController()
+        AppState.nowPlaying = controller?.let {
+            val metadata = it.metadata
+            val state = it.playbackState?.state
+            NowPlaying(
+                app = appName(it),
+                title = metadata.text(MediaMetadata.METADATA_KEY_TITLE),
+                artist = artistOf(metadata),
+                playing = state == PlaybackState.STATE_PLAYING || state == PlaybackState.STATE_BUFFERING,
+                art = artOf(metadata),
+            )
+        }
     }
 
     private fun syncPc() {

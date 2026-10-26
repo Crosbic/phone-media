@@ -13,10 +13,13 @@ class Handshake(
     var pcName = "ПК"
         private set
 
+    var pcId = ""
+        private set
+
     fun run(): Boolean {
         val hello = receive()
         if (hello.optString("type") != "hello") return false
-        val pcId = hello.getString("pcId")
+        pcId = hello.getString("pcId")
         pcName = hello.optString("name").ifEmpty { "ПК" }
         val pcNonce = hello.bytes("nonce")
 

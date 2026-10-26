@@ -92,7 +92,7 @@ git push --follow-tags
 
 `phone-media.exe --pair` сразу запускает программу в режиме сопряжения нового телефона.
 
-Сопряжённые телефоны ПК хранит в `%APPDATA%\phone-media\pairings.json`. На телефоне список сопряжённых ПК виден в приложении; там же есть кнопка «Забыть все ПК».
+Сопряжённые телефоны ПК хранит в `%APPDATA%\phone-media\pairings.json`. На телефоне список сопряжённых ПК виден в приложении, у каждого есть кнопка «Забыть».
 
 ## Как это работает
 
@@ -183,14 +183,16 @@ pc/
   src/autostart.rs     автозапуск через HKCU\…\Run
   src/bin/probe.rs     отладочная утилита
   build.rs, assets/    иконки, описание и манифест exe
-  tools/make_icons.py  генератор иконок
 android/app/src/main/java/com/crosbic/phonemedia/
-  MainActivity.kt          экран: разрешения, код сопряжения, список ПК, журнал
+  MainActivity.kt          разрешения и действия экрана
+  Ui.kt                    экраны на Compose и Material 3: настройка, главный, сопряжение, журнал
+  AppState.kt              состояние для экрана: что играет, какие ПК подключены и сопряжены
   MediaListenerService.kt  плееры телефона, отправка состояния, выполнение команд
   PcServer.kt              ответ на поиск, TCP-сервер, рассылка ПК
   Handshake.kt             проверка ПК и сопряжение
   Crypto.kt, Pairings.kt   криптография и хранение сопряжённых ПК
-  MediaLog.kt              журнал (logcat, тег PhoneMedia) и его показ на экране
+  MediaLog.kt              журнал (logcat, тег PhoneMedia)
+tools/make_icons.py        иконки для ПК (ICO) и Android (адаптивная) из одной геометрии
 ```
 
 ## Отладка
@@ -200,4 +202,4 @@ android/app/src/main/java/com/crosbic/phonemedia/
   - `probe play | pause | toggle | stop | next | prev | seek <секунды>` — отправить команду сессии Phone Media, как будто нажали кнопку в плашке.
 - **Журнал телефона:** `adb logcat -s PhoneMedia`.
 - **Отладочная сборка** (`cargo run`) пишет журнал ещё и в консоль.
-- **Иконки** перерисовываются командой `python tools/make_icons.py [папка для PNG-превью]` из папки `pc`.
+- **Иконки** перерисовываются командой `python tools/make_icons.py [папка для PNG-превью]` из корня репозитория. Она обновляет `pc/assets/*.ico` и адаптивную иконку в `android/app/src/main/res`.

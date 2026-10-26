@@ -7,6 +7,7 @@ import org.json.JSONObject
 
 class Pairings(context: Context) {
     private val prefs = context.getSharedPreferences("pairings", Context.MODE_PRIVATE)
+    private val main = Handler(Looper.getMainLooper())
 
     val phoneId: String = prefs.getString(PHONE_ID, null)
         ?: Crypto.hex(Crypto.random(16)).also { prefs.edit().putString(PHONE_ID, it).apply() }
@@ -17,15 +18,22 @@ class Pairings(context: Context) {
     fun add(pcId: String, name: String, key: ByteArray) {
         val entry = JSONObject().put("name", name).put("key", Crypto.toBase64(key))
         prefs.edit().putString(PC + pcId, entry.toString()).apply()
+        publish()
     }
 
-    fun names(): List<String> =
-        prefs.all.filterKeys { it.startsWith(PC) }.values.map { JSONObject(it as String).getString("name") }.sorted()
+    fun forget(pcId: String) {
+        prefs.edit().remove(PC + pcId).apply()
+        publish()
+    }
 
-    fun forgetAll() {
-        val editor = prefs.edit()
-        prefs.all.keys.filter { it.startsWith(PC) }.forEach(editor::remove)
-        editor.apply()
+    fun list(): List<Pc> =
+        prefs.all.filterKeys { it.startsWith(PC) }
+            .map { (key, value) -> Pc(key.removePrefix(PC), JSONObject(value as String).getString("name")) }
+            .sortedBy { it.name }
+
+    fun publish() {
+        val pcs = list()
+        main.post { AppState.pairedPcs = pcs }
     }
 
     private companion object {
@@ -37,25 +45,17 @@ class Pairings(context: Context) {
 object PairingWindow {
     @Volatile var isOpen = false
 
-    var request: Pair<String, String>? = null
-        private set
-    var onChange: (() -> Unit)? = null
-
     private val main = Handler(Looper.getMainLooper())
 
     fun show(pcName: String, code: String) {
         main.post {
             val pretty = code.chunked(3).joinToString(" ")
-            request = pcName to pretty
+            AppState.pairingRequest = PairingRequest(pcName, pretty)
             MediaLog.add("ПК «$pcName» просит сопряжения, код $pretty")
-            onChange?.invoke()
         }
     }
 
     fun hide() {
-        main.post {
-            request = null
-            onChange?.invoke()
-        }
+        main.post { AppState.pairingRequest = null }
     }
 }
