@@ -33,7 +33,9 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -71,6 +73,14 @@ import androidx.compose.ui.unit.sp
 data class Setup(val listener: Boolean, val network: Boolean, val battery: Boolean) {
     val done get() = listener && network && battery
 }
+
+class UpdateActions(
+    val version: String,
+    val canInstall: Boolean,
+    val install: (Release) -> Unit,
+    val allowInstall: () -> Unit,
+    val check: () -> Unit,
+)
 
 class SetupActions(
     val grantListener: () -> Unit,
@@ -138,13 +148,13 @@ fun PhoneMediaTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-fun PhoneMediaApp(setup: Setup, actions: SetupActions, onForget: (Pc) -> Unit) {
+fun PhoneMediaApp(setup: Setup, actions: SetupActions, updates: UpdateActions, onForget: (Pc) -> Unit) {
     var showLog by rememberSaveable { mutableStateOf(false) }
     val request = AppState.pairingRequest
     when {
         request != null -> PairingScreen(request)
         showLog -> LogScreen(onBack = { showLog = false })
-        else -> MainScreen(setup, actions, onForget = onForget, onOpenLog = { showLog = true })
+        else -> MainScreen(setup, actions, updates, onForget = onForget, onOpenLog = { showLog = true })
     }
 }
 
@@ -208,10 +218,17 @@ private fun AppMark(size: Dp) {
 }
 
 @Composable
-private fun MainScreen(setup: Setup, actions: SetupActions, onForget: (Pc) -> Unit, onOpenLog: () -> Unit) {
+private fun MainScreen(
+    setup: Setup,
+    actions: SetupActions,
+    updates: UpdateActions,
+    onForget: (Pc) -> Unit,
+    onOpenLog: () -> Unit,
+) {
     var forgetting by remember { mutableStateOf<Pc?>(null) }
     val connected = AppState.connectedPcs
     Screen(title = "Phone Media", brand = true) {
+        UpdateCard(AppState.update, updates)
         if (!setup.done) PermissionsSection(setup, actions)
         ConnectionCard(connected)
         NowPlayingCard(AppState.nowPlaying, connected = connected.isNotEmpty())
@@ -242,6 +259,7 @@ private fun MainScreen(setup: Setup, actions: SetupActions, onForget: (Pc) -> Un
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        AboutRow(AppState.update, updates)
     }
     forgetting?.let { pc ->
         AlertDialog(
@@ -393,6 +411,94 @@ private fun PcCard(pc: Pc, online: Boolean, onForget: () -> Unit) {
 }
 
 @Composable
+private fun UpdateCard(state: UpdateState, updates: UpdateActions) {
+    val release = when (state) {
+        is UpdateState.Available -> state.release
+        is UpdateState.Downloading -> state.release
+        is UpdateState.Installing -> state.release
+        is UpdateState.Failed -> state.release
+        else -> null
+    } ?: return
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "Доступна версия ${release.version}",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            when (state) {
+                is UpdateState.Downloading -> {
+                    Text("Скачиваю", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                    LinearProgressIndicator(progress = { state.progress }, modifier = Modifier.fillMaxWidth())
+                }
+                is UpdateState.Installing -> Text(
+                    text = "Подтверди установку в окне Android",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                else -> {
+                    val failure = (state as? UpdateState.Failed)?.message
+                    Text(
+                        text = failure ?: "Сейчас установлена ${updates.version}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (failure != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    if (!updates.canInstall) {
+                        Text(
+                            text = "Чтобы обновляться, разреши Phone Media устанавливать приложения",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                    Button(
+                        onClick = { if (updates.canInstall) updates.install(release) else updates.allowInstall() },
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Text(
+                            when {
+                                !updates.canInstall -> "Разрешить установку"
+                                failure != null -> "Повторить"
+                                else -> "Обновить"
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutRow(state: UpdateState, updates: UpdateActions) {
+    val busy = state is UpdateState.Checking || state is UpdateState.Downloading || state is UpdateState.Installing
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = "Phone Media ${updates.version}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val status = when (state) {
+                UpdateState.Checking -> "Проверяю обновления"
+                UpdateState.UpToDate -> "Установлена последняя версия"
+                is UpdateState.Failed -> if (state.release == null) state.message else null
+                else -> null
+            }
+            status?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        TextButton(onClick = updates.check, enabled = !busy) { Text("Проверить обновления") }
+    }
+}
+
+@Composable
 private fun SectionTitle(text: String) {
     Text(
         text = text,
@@ -433,35 +539,42 @@ private fun PermissionDivider() {
 
 @Composable
 private fun PermissionRow(title: String, description: String, granted: Boolean, grant: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            PermissionBadge(granted)
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    text = if (granted) "Включено" else "Выключено",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+        if (!granted) {
+            FilledTonalButton(onClick = grant, modifier = Modifier.align(Alignment.End).padding(top = 8.dp)) {
+                Text("Включить")
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionBadge(granted: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(if (granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.errorContainer),
+        contentAlignment = Alignment.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .clip(CircleShape)
-                .background(if (granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.errorContainer),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = if (granted) Icons.Filled.Check else Icons.Filled.PriorityHigh,
-                contentDescription = null,
-                tint = if (granted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(
-                text = if (granted) "Включено" else "Выключено",
-                style = MaterialTheme.typography.labelMedium,
-                color = if (granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-            )
-        }
-        if (!granted) FilledTonalButton(onClick = grant) { Text("Включить") }
+        Icon(
+            imageVector = if (granted) Icons.Filled.Check else Icons.Filled.PriorityHigh,
+            contentDescription = null,
+            tint = if (granted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onErrorContainer,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 

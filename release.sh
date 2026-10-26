@@ -21,10 +21,12 @@ if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
     echo "Тег v$version уже есть" >&2
     exit 1
 fi
-if [[ ! -f android/signing/keystore.properties ]]; then
-    echo "Нет ключа подписи APK: android/signing/keystore.properties" >&2
-    exit 1
-fi
+for key in signing/keystore.properties signing/update.key; do
+    if [[ ! -f "$key" ]]; then
+        echo "Нет ключа подписи: $key" >&2
+        exit 1
+    fi
+done
 
 sed -i "0,/^version = .*/s//version = \"$major.$minor.$patch\"/" pc/Cargo.toml
 sed -i "s/name=\"Crosbic.PhoneMedia\" version=\"[0-9.]*\"/name=\"Crosbic.PhoneMedia\" version=\"$major.$minor.$patch.0\"/" pc/assets/phone-media.manifest
@@ -44,6 +46,7 @@ out="dist/$version"
 rm -rf "$out"
 mkdir -p "$out"
 cp pc/target/release/phone-media.exe "$out/PhoneMedia-$version.exe"
+pc/target/release/sign.exe signing/update.key "$out/PhoneMedia-$version.exe"
 cp "$apk" "$out/PhoneMedia-$version.apk"
 (cd "$out" && sha256sum "PhoneMedia-$version.exe" "PhoneMedia-$version.apk" > SHA256SUMS)
 

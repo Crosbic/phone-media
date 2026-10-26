@@ -50,11 +50,13 @@ class MediaListenerService : NotificationListenerService() {
         val component = listenerComponent(this)
         manager.addOnActiveSessionsChangedListener(sessionsListener, component)
         MediaLog.add("доступ к уведомлениям есть, слежу за плеерами")
+        Updater.startPeriodic(this)
         track(manager.getActiveSessions(component))
     }
 
     override fun onListenerDisconnected() {
         main.removeCallbacks(syncRunnable)
+        Updater.stopPeriodic()
         pc?.stop()
         pc = null
         getSystemService(MediaSessionManager::class.java).removeOnActiveSessionsChangedListener(sessionsListener)

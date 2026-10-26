@@ -23,5 +23,6 @@ object AppState {
     var connectedPcs by mutableStateOf<List<Pc>>(emptyList())
     var pairedPcs by mutableStateOf<List<Pc>>(emptyList())
     var pairingRequest by mutableStateOf<PairingRequest?>(null)
+    var update by mutableStateOf<UpdateState>(UpdateState.Idle)
     val log = mutableStateListOf<String>()
 }

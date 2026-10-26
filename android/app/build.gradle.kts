@@ -6,7 +6,7 @@ plugins {
 }
 
 val signing = Properties().apply {
-    val file = rootProject.file("signing/keystore.properties")
+    val file = rootProject.file("../signing/keystore.properties")
     if (file.exists()) file.inputStream().use(::load)
 }
 
@@ -20,6 +20,9 @@ android {
         targetSdk = 37
         versionCode = 10100
         versionName = "1.1"
+        val updateUrl = project.findProperty("updateUrl") as String?
+        manifestPlaceholders["updateUrl"] = updateUrl.orEmpty()
+        manifestPlaceholders["cleartext"] = updateUrl != null
     }
 
     buildFeatures {

@@ -7,13 +7,15 @@ mod identity;
 mod pairing;
 mod phone;
 mod tray;
+mod update;
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Duration;
@@ -22,10 +24,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::json;
 use windows::Media::SystemMediaTransportControlsButton as Button;
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
 use windows::core::GUID;
@@ -47,6 +49,8 @@ pub enum Event {
     Disconnected,
     PairNew,
     CancelPairing,
+    CheckUpdates,
+    Restart(PathBuf),
     Quit,
 }
 
@@ -54,7 +58,17 @@ const SEARCHING: &str = "Ищу телефон…";
 const WAITING_FOR_NEW: &str = "Жду новый телефон: откройте на нём Phone Media";
 
 fn main() -> windows::core::Result<()> {
-    if already_running() {
+    let args: Vec<String> = std::env::args().collect();
+    let updated_from = args
+        .iter()
+        .position(|arg| arg == "--updated")
+        .and_then(|index| args.get(index + 1).cloned());
+    let wait = if updated_from.is_some() {
+        Duration::from_secs(15)
+    } else {
+        Duration::ZERO
+    };
+    if !acquire_instance(wait) {
         unsafe {
             MessageBoxW(
                 None,
@@ -76,12 +90,16 @@ fn main() -> windows::core::Result<()> {
     {
         log(format!("не удалось обновить автозапуск: {error}"));
     }
+    update::cleanup();
 
     let (events, rx) = mpsc::channel();
-    let pairing = Arc::new(AtomicBool::new(std::env::args().any(|arg| arg == "--pair")));
+    let pairing = Arc::new(AtomicBool::new(args.iter().any(|arg| arg == "--pair")));
     let tray = Tray::spawn(events.clone(), pairing.clone());
     let mut flyout = Flyout::new(events.clone())?;
-    phone::spawn(events, pairing.clone());
+    phone::spawn(events.clone(), pairing.clone());
+    if cfg!(not(debug_assertions)) {
+        update::spawn(events.clone());
+    }
     let searching = |pairing: &AtomicBool| {
         if pairing.load(Ordering::Relaxed) {
             WAITING_FOR_NEW
@@ -91,6 +109,15 @@ fn main() -> windows::core::Result<()> {
     };
     log(searching(&pairing));
     tray.update(|status| status.phone = searching(&pairing).to_string());
+    if let Some(old) = updated_from {
+        log(format!("обновлено: {old} → {}", update::VERSION));
+        tray.update(|status| {
+            status.balloon = Some((
+                format!("Phone Media обновлена до {}", update::VERSION),
+                format!("Была версия {old}"),
+            ))
+        });
+    }
 
     let mut link: Option<TcpStream> = None;
     let mut last_logged = String::new();
@@ -182,6 +209,25 @@ fn main() -> windows::core::Result<()> {
                 }
                 Ok(())
             }
+            Event::CheckUpdates => {
+                if cfg!(debug_assertions) {
+                    log("в отладочной сборке обновления отключены");
+                } else {
+                    update::check_now(events.clone());
+                }
+                Ok(())
+            }
+            Event::Restart(exe) => {
+                let _ = flyout.hide();
+                tray.remove();
+                if let Err(error) = Command::new(&exe)
+                    .args(["--updated", update::VERSION])
+                    .spawn()
+                {
+                    log(format!("не удалось запустить новую версию: {error}"));
+                }
+                return Ok(());
+            }
             Event::Quit => {
                 log("выход");
                 let _ = flyout.hide();
@@ -196,10 +242,13 @@ fn main() -> windows::core::Result<()> {
     Ok(())
 }
 
-fn already_running() -> bool {
+fn acquire_instance(wait: Duration) -> bool {
     unsafe {
-        let _ = CreateMutexW(None, false, w!(r"Local\Crosbic.PhoneMedia"));
-        GetLastError() == ERROR_ALREADY_EXISTS
+        let Ok(mutex) = CreateMutexW(None, false, w!(r"Local\Crosbic.PhoneMedia")) else {
+            return true;
+        };
+        let result = WaitForSingleObject(mutex, wait.as_millis() as u32);
+        result == WAIT_OBJECT_0 || result == WAIT_ABANDONED
     }
 }
 
@@ -256,7 +305,14 @@ pub fn log(message: impl AsRef<str>) {
     let file = FILE.get_or_init(|| {
         let path = log_path();
         fs::create_dir_all(path.parent()?).ok()?;
-        let mut file = File::create(path).ok()?;
+        let updated = std::env::args().any(|arg| arg == "--updated");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(updated)
+            .truncate(!updated)
+            .open(path)
+            .ok()?;
         let _ = writeln!(
             file,
             "Phone Media {}, журнал за {:02}.{:02}.{}",

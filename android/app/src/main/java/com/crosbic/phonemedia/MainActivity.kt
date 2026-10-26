@@ -22,6 +22,7 @@ private const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
 class MainActivity : ComponentActivity() {
     private val pairings by lazy { Pairings(this) }
     private var setup by mutableStateOf(Setup(listener = false, network = false, battery = false))
+    private var canInstall by mutableStateOf(false)
     private val requestNetwork = registerForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,6 +37,13 @@ class MainActivity : ComponentActivity() {
                         grantNetwork = { requestNetwork.launch(LOCAL_NETWORK) },
                         grantBattery = ::openBatterySettings,
                     ),
+                    updates = UpdateActions(
+                        version = Updater.currentVersion(this),
+                        canInstall = canInstall,
+                        install = { Updater.install(this, it) },
+                        allowInstall = ::openInstallSettings,
+                        check = { Updater.check(this, manual = true) },
+                    ),
                     onForget = ::forget,
                 )
             }
@@ -47,6 +55,7 @@ class MainActivity : ComponentActivity() {
         PairingWindow.isOpen = true
         refresh()
         pairings.publish()
+        Updater.checkOnOpen(this)
     }
 
     override fun onPause() {
@@ -62,6 +71,7 @@ class MainActivity : ComponentActivity() {
                 checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED,
             battery = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName),
         )
+        canInstall = packageManager.canRequestPackageInstalls()
     }
 
     private fun forget(pc: Pc) {
@@ -78,6 +88,10 @@ class MainActivity : ComponentActivity() {
         } catch (_: ActivityNotFoundException) {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         }
+    }
+
+    private fun openInstallSettings() {
+        startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
     }
 
     private fun openBatterySettings() {

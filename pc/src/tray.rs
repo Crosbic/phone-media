@@ -8,8 +8,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{LIM_SMALL, LoadIconMetric};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_MESSAGE,
-    NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -31,12 +31,14 @@ const COMMAND_CANCEL_PAIRING: usize = 2;
 const COMMAND_AUTOSTART: usize = 3;
 const COMMAND_LOG: usize = 4;
 const COMMAND_QUIT: usize = 5;
+const COMMAND_UPDATE: usize = 6;
 
 #[derive(Clone, Default)]
 pub struct Status {
     pub connected: bool,
     pub phone: String,
     pub track: Option<String>,
+    pub balloon: Option<(String, String)>,
 }
 
 pub struct Tray {
@@ -172,10 +174,13 @@ unsafe extern "system" fn window_proc(
 fn notify(window: HWND, action: NOTIFY_ICON_MESSAGE) {
     STATE.with_borrow(|state| {
         let Some(state) = state else { return };
-        let status = state
+        let (status, balloon) = state
             .status
             .lock()
-            .map(|status| status.clone())
+            .map(|mut status| {
+                let balloon = status.balloon.take();
+                (status.clone(), balloon)
+            })
             .unwrap_or_default();
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -196,6 +201,17 @@ fn notify(window: HWND, action: NOTIFY_ICON_MESSAGE) {
         }
         let tip: Vec<u16> = tip.encode_utf16().take(data.szTip.len() - 1).collect();
         data.szTip[..tip.len()].copy_from_slice(&tip);
+        if let Some((title, text)) = balloon {
+            data.uFlags |= NIF_INFO;
+            data.dwInfoFlags = NIIF_INFO;
+            let title: Vec<u16> = title
+                .encode_utf16()
+                .take(data.szInfoTitle.len() - 1)
+                .collect();
+            data.szInfoTitle[..title.len()].copy_from_slice(&title);
+            let text: Vec<u16> = text.encode_utf16().take(data.szInfo.len() - 1).collect();
+            data.szInfo[..text.len()].copy_from_slice(&text);
+        }
         let _ = unsafe { Shell_NotifyIconW(action, &data) };
     });
 }
@@ -248,6 +264,7 @@ fn show_menu(window: HWND) {
             COMMAND_AUTOSTART,
             w!("Запускать вместе с Windows"),
         );
+        let _ = AppendMenuW(menu, MF_STRING, COMMAND_UPDATE, w!("Проверить обновления"));
         let _ = AppendMenuW(menu, MF_STRING, COMMAND_LOG, w!("Открыть журнал"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, COMMAND_QUIT, w!("Выход"));
@@ -279,6 +296,9 @@ fn show_menu(window: HWND) {
                 Ok(()) => log("автозапуск включён"),
                 Err(error) => log(format!("не удалось изменить автозапуск: {error}")),
             },
+            COMMAND_UPDATE => {
+                let _ = events.send(Event::CheckUpdates);
+            }
             COMMAND_LOG => {
                 ShellExecuteW(
                     None,
