@@ -3,6 +3,7 @@ name = "phone-media"
 version = "1.2.0"
 edition = "2024"
 default-run = "phone-media"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 base64 = "0.23.1"
