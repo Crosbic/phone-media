@@ -27,7 +27,7 @@ pub enum PhoneMessage {
     Ping,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Player {
     pub app: String,

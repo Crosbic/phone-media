@@ -327,6 +327,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "windows",
+ "windows-numerics",
  "winresource",
 ]
 

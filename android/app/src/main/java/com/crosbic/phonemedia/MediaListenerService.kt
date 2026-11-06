@@ -30,12 +30,16 @@ class MediaListenerService : NotificationListenerService() {
 
     private val tracked = mutableMapOf<MediaSession.Token, Tracked>()
     private var order = emptyList<MediaSession.Token>()
-    private val sessionsListener =
-        MediaSessionManager.OnActiveSessionsChangedListener { controllers -> track(controllers.orEmpty()) }
+    private var mainToken: MediaSession.Token? = null
+    private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
+        track(controllers.orEmpty())
+        scheduleSync()
+    }
 
     private var pc: PcServer? = null
     private val main = Handler(Looper.getMainLooper())
     private val syncRunnable = Runnable {
+        activeSessions()?.let(::track)
         publishNowPlaying()
         syncPc()
     }
@@ -52,6 +56,7 @@ class MediaListenerService : NotificationListenerService() {
         MediaLog.add("доступ к уведомлениям есть, слежу за плеерами")
         Updater.startPeriodic(this)
         track(manager.getActiveSessions(component))
+        scheduleSync()
     }
 
     override fun onListenerDisconnected() {
@@ -63,6 +68,7 @@ class MediaListenerService : NotificationListenerService() {
         tracked.values.forEach { it.controller.unregisterCallback(it.callback) }
         tracked.clear()
         order = emptyList()
+        mainToken = null
         AppState.nowPlaying = null
         MediaLog.add("доступ к уведомлениям отключён")
     }
@@ -92,7 +98,17 @@ class MediaListenerService : NotificationListenerService() {
         }
 
         if (changed) MediaLog.add("активных плееров: ${active.size}")
-        scheduleSync()
+        val first = order.firstOrNull { it in tracked }
+        if (first != mainToken) {
+            mainToken = first
+            first?.let(tracked::get)?.let { MediaLog.add("главный плеер: ${appName(it.controller)}") }
+        }
+    }
+
+    private fun activeSessions(): List<MediaController>? = try {
+        getSystemService(MediaSessionManager::class.java).getActiveSessions(listenerComponent(this))
+    } catch (_: SecurityException) {
+        null
     }
 
     private fun changed(token: MediaSession.Token) {

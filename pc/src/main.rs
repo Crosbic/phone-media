@@ -6,8 +6,11 @@ mod flyout;
 mod identity;
 mod pairing;
 mod phone;
+mod popup;
 mod tray;
 mod update;
+mod view;
+mod widget;
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -18,7 +21,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -133,6 +136,7 @@ fn main() -> windows::core::Result<()> {
                 tray.update(|status| {
                     status.connected = true;
                     status.phone = format!("Телефон: {name}");
+                    status.name = Some(name);
                 });
                 Ok(())
             }
@@ -143,7 +147,10 @@ fn main() -> windows::core::Result<()> {
                 tray.update(|status| {
                     status.connected = false;
                     status.phone = searching(&pairing).to_string();
+                    status.name = None;
                     status.track = None;
+                    status.player = None;
+                    status.art = None;
                 });
                 flyout.hide()
             }
@@ -162,17 +169,24 @@ fn main() -> windows::core::Result<()> {
                     last_logged = line;
                 }
                 tray.update(|status| {
-                    status.track = Some(format!("{icon} {} — {}", player.artist, player.title))
+                    status.track = Some(format!("{icon} {} — {}", player.artist, player.title));
+                    status.player = Some((player.clone(), Instant::now()));
                 });
                 flyout.show(&player)
             }
             Event::Message(PhoneMessage::Art { jpeg }) => {
-                flyout.set_art(jpeg.and_then(|text| BASE64.decode(text).ok()))
+                let art = jpeg.and_then(|text| BASE64.decode(text).ok());
+                tray.update(|status| status.art = art.as_deref().map(Arc::from));
+                flyout.set_art(art)
             }
             Event::Message(PhoneMessage::Idle) => {
                 log("на телефоне ничего не играет");
                 last_logged.clear();
-                tray.update(|status| status.track = None);
+                tray.update(|status| {
+                    status.track = None;
+                    status.player = None;
+                    status.art = None;
+                });
                 flyout.hide()
             }
             Event::Message(PhoneMessage::Ping) => Ok(()),
