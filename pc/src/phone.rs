@@ -38,6 +38,10 @@ pub struct Player {
     pub position_ms: u64,
     pub duration_ms: u64,
     pub actions: Vec<String>,
+    pub volume: Option<u32>,
+    pub volume_max: u32,
+    pub muted: bool,
+    pub volume_fixed: bool,
 }
 
 impl Player {

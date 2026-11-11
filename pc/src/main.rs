@@ -4,6 +4,8 @@ mod autostart;
 mod dialog;
 mod flyout;
 mod identity;
+mod keys;
+mod osd;
 mod pairing;
 mod phone;
 mod popup;
@@ -40,9 +42,18 @@ use flyout::Flyout;
 use phone::PhoneMessage;
 use tray::Tray;
 
+#[derive(Clone, Copy)]
+pub enum VolumeChange {
+    Set(u32),
+    Up,
+    Down,
+    Mute,
+}
+
 pub enum Event {
     Button(Button),
     Seek(Duration),
+    Volume(VolumeChange),
     Connected {
         name: String,
         address: SocketAddr,
@@ -168,10 +179,34 @@ fn main() -> windows::core::Result<()> {
                     log(&line);
                     last_logged = line;
                 }
+                let mut repeat = None;
                 tray.update(|status| {
                     status.track = Some(format!("{icon} {} — {}", player.artist, player.title));
-                    status.player = Some((player.clone(), Instant::now()));
+                    let mut shown = player.clone();
+                    status.volume_target = match status.volume_target {
+                        Some(mut target)
+                            if target.at.elapsed() < view::VOLUME_HOLD
+                                && target.max == shown.volume_max =>
+                        {
+                            if shown.volume.is_some() && shown.volume != Some(target.level) {
+                                if !target.repeated && target.at.elapsed() >= view::VOLUME_RECHECK {
+                                    target.repeated = true;
+                                    repeat = Some(target.level);
+                                }
+                                shown.volume = Some(target.level);
+                            }
+                            Some(target)
+                        }
+                        _ => None,
+                    };
+                    status.player = Some((shown, Instant::now()));
                 });
+                if let Some(level) = repeat {
+                    send(
+                        &mut link,
+                        json!({ "type": "command", "action": "volume", "level": level }),
+                    );
+                }
                 flyout.show(&player)
             }
             Event::Message(PhoneMessage::Art { jpeg }) => {
@@ -204,6 +239,18 @@ fn main() -> windows::core::Result<()> {
                     &mut link,
                     json!({ "type": "command", "action": "seek", "positionMs": position_ms }),
                 );
+                Ok(())
+            }
+            Event::Volume(change) => {
+                let message = match change {
+                    VolumeChange::Set(level) => {
+                        json!({ "type": "command", "action": "volume", "level": level })
+                    }
+                    VolumeChange::Up => json!({ "type": "command", "action": "volumeUp" }),
+                    VolumeChange::Down => json!({ "type": "command", "action": "volumeDown" }),
+                    VolumeChange::Mute => json!({ "type": "command", "action": "mute" }),
+                };
+                send(&mut link, message);
                 Ok(())
             }
             Event::PairNew => {

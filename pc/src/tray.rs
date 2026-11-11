@@ -25,7 +25,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::phone::Player;
-use crate::{Event, autostart, log, log_path, popup, update, widget};
+
+#[derive(Clone, Copy)]
+pub struct VolumeTarget {
+    pub level: u32,
+    pub max: u32,
+    pub at: Instant,
+    pub repeated: bool,
+}
+use crate::view::{change_volume, volume_controllable};
+use crate::{Event, VolumeChange, autostart, keys, log, log_path, osd, popup, update, widget};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_REFRESH: u32 = WM_APP + 2;
@@ -40,6 +49,7 @@ const COMMAND_LOG: usize = 4;
 const COMMAND_QUIT: usize = 5;
 const COMMAND_UPDATE: usize = 6;
 const COMMAND_WINDOW: usize = 7;
+const COMMAND_VOLUME_KEYS: usize = 8;
 
 #[derive(Clone, Default)]
 pub struct Status {
@@ -50,6 +60,7 @@ pub struct Status {
     pub player: Option<(Player, Instant)>,
     pub art: Option<Arc<[u8]>>,
     pub balloon: Option<(String, String)>,
+    pub volume_target: Option<VolumeTarget>,
 }
 
 pub struct Tray {
@@ -141,6 +152,8 @@ fn run(
         };
         popup::create(status.clone(), events.clone());
         widget::init(status.clone(), events.clone());
+        osd::create(status.clone(), events.clone());
+        keys::init(window);
         STATE.set(Some(State {
             events,
             status,
@@ -183,10 +196,24 @@ unsafe extern "system" fn window_proc(
         },
         WM_REFRESH => {
             notify(window, NIM_MODIFY);
+            STATE.with_borrow(|state| {
+                if let Some(state) = state {
+                    let available = state
+                        .status
+                        .lock()
+                        .map(|status| volume_controllable(&status))
+                        .unwrap_or(false);
+                    keys::set_available(available);
+                }
+            });
             popup::refresh();
             widget::refresh();
+            osd::refresh();
         }
+        keys::WM_VOLUME_KEY => volume_key(wparam.0),
         WM_CLOSE => {
+            keys::stop();
+            osd::destroy();
             popup::destroy();
             widget::shutdown();
             notify(window, NIM_DELETE);
@@ -197,6 +224,24 @@ unsafe extern "system" fn window_proc(
         _ => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
     }
     LRESULT(0)
+}
+
+fn volume_key(key: usize) {
+    let change = match key {
+        keys::KEY_UP => VolumeChange::Up,
+        keys::KEY_DOWN => VolumeChange::Down,
+        keys::KEY_MUTE => VolumeChange::Mute,
+        _ => return,
+    };
+    let context = STATE.with_borrow(|state| {
+        state
+            .as_ref()
+            .map(|state| (state.status.clone(), state.events.clone()))
+    });
+    if let Some((status, events)) = context {
+        change_volume(&status, &events, change);
+        osd::show();
+    }
 }
 
 fn notify(window: HWND, action: NOTIFY_ICON_MESSAGE) {
@@ -322,6 +367,17 @@ fn show_menu(window: HWND) {
             COMMAND_WINDOW,
             w!("Окно мини-плеера"),
         );
+        let volume_keys = if keys::is_enabled() {
+            MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING | volume_keys,
+            COMMAND_VOLUME_KEYS,
+            w!("Клавиши громкости — для телефона"),
+        );
         if pairing {
             let _ = AppendMenuW(
                 menu,
@@ -380,6 +436,7 @@ fn show_menu(window: HWND) {
                 let _ = events.send(Event::CheckUpdates);
             }
             COMMAND_WINDOW => widget::toggle(),
+            COMMAND_VOLUME_KEYS => keys::set_enabled(!keys::is_enabled()),
             COMMAND_LOG => {
                 ShellExecuteW(
                     None,

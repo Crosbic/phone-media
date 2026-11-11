@@ -33,23 +33,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND,
     WM_CONTEXTMENU, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED,
     WM_DWMSENDICONICLIVEPREVIEWBITMAP, WM_DWMSENDICONICTHUMBNAIL, WM_ERASEBKGND, WM_EXITSIZEMOVE,
-    WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE,
-    WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NULL,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SIZING, WM_THEMECHANGED,
-    WM_TIMER, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WNDCLASSW, WS_CAPTION, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MINIMIZEBOX, WS_POPUP, WS_THICKFRAME,
+    WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONDOWN,
+    WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SIZING, WM_THEMECHANGED, WM_TIMER, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WNDCLASSW,
+    WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MINIMIZEBOX,
+    WS_POPUP, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::tray::Status;
 use crate::view::{
-    COMMAND_NEXT, COMMAND_PREVIOUS, COMMAND_TOGGLE, Glyph, Transport, View, fit_height, tallest,
+    COMMAND_NEXT, COMMAND_PREVIOUS, COMMAND_TOGGLE, Glyph, Layout, Transport, View, fit_height,
+    tallest,
 };
 use crate::{Event, known_folder, log};
 
 const CLASS: PCWSTR = w!("PhoneMediaWindow");
 const SIZE: (f32, f32) = (340.0, 170.0);
-const MIN_SIZE: (f32, f32) = (260.0, 150.0);
+const MIN_SIZE: (f32, f32) = (260.0, 180.0);
 const MAX_WIDTH: f32 = 720.0;
 const SCREEN_MARGIN: f32 = 24.0;
 const EDGE: f32 = 6.0;
@@ -249,7 +251,7 @@ impl Widget {
                 None,
             )?
         };
-        let mut view = match View::new(window, status, events, false, true) {
+        let mut view = match View::new(window, status, events, Layout::Window) {
             Ok(view) => view,
             Err(error) => {
                 unsafe {
@@ -495,8 +497,9 @@ fn initial_rect(saved: &Saved) -> (i32, i32, i32, i32) {
                 let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
                 let limit = |length: f32| (length * dpi as f32 / 96.0).round() as i32;
                 let width = (right - left).min(limit(MAX_WIDTH));
-                let height =
-                    (bottom - top).min(limit(fit_height(width as f32 * 96.0 / dpi as f32)));
+                let height = (bottom - top)
+                    .min(limit(fit_height(width as f32 * 96.0 / dpi as f32)))
+                    .max(limit(MIN_SIZE.1));
                 return (left, top, width, height);
             }
         }
@@ -593,6 +596,9 @@ unsafe extern "system" fn window_proc(
                 return LRESULT(MA_NOACTIVATE as isize);
             }
             return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+        }
+        WM_MOUSEWHEEL => {
+            with(|widget| widget.view.wheel(((wparam.0 >> 16) & 0xFFFF) as i16));
         }
         WM_MOUSEMOVE => {
             with(|widget| widget.view.mouse_move(lparam));

@@ -17,14 +17,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     SendMessageW, SetTimer, SetWindowPos, ShowWindow, WM_CAPTURECHANGED,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETTINGCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT,
+    WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
 
 use crate::tray::Status;
-use crate::view::{View, WIDTH};
+use crate::view::{Layout, View, WIDTH};
 use crate::{Event, log};
 
 const CLASS: PCWSTR = w!("PhoneMediaPopup");
@@ -142,7 +142,7 @@ impl Popup {
             )?
         };
         Ok(Self {
-            view: View::new(window, status, events, true, false)?,
+            view: View::new(window, status, events, Layout::Popup)?,
             anchor: RECT::default(),
             origin: (0, 0),
             direction: 1,
@@ -360,6 +360,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_CAPTURECHANGED => {
             with(|popup| popup.view.lost_capture());
+        }
+        WM_MOUSEWHEEL => {
+            with(|popup| popup.view.wheel(((wparam.0 >> 16) & 0xFFFF) as i16));
         }
         WM_TIMER if wparam.0 == WATCH_TIMER => {
             with(Popup::watch);

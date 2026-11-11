@@ -7,7 +7,7 @@ use windows::UI::ViewManagement::{UIColorType, UISettings};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND,
@@ -63,8 +63,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, HSTRING, PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::tray::Status;
-use crate::{Event, log};
+use crate::tray::{Status, VolumeTarget};
+use crate::{Event, VolumeChange, log};
 
 pub const WIDTH: f32 = 320.0;
 const PAD: f32 = 16.0;
@@ -77,13 +77,22 @@ const SIDE_SHARE: f32 = 0.5;
 const ART_GAP: f32 = 12.0;
 const TEXT_GAP: f32 = 8.0;
 const FIT_TEXT: f32 = 58.0;
-const FIT_BELOW: f32 = 80.0;
+const FIT_BELOW: f32 = 80.0 + VOLUME_ROW;
 const THUMB_HEIGHT: f32 = 100.0;
 const THUMB_MIN_WIDTH: f32 = 200.0;
 const THUMB_PAD: f32 = 10.0;
 const THUMB_BAR_GAP: f32 = 8.0;
 const ICON_CONNECTED: usize = 1;
 const ICON_DISCONNECTED: usize = 2;
+const VOLUME_ROW: f32 = 20.0;
+const SLIDE_EVERY: Duration = Duration::from_millis(40);
+const CONTROLS_GAP: f32 = 24.0;
+const PROGRESS_GAP: f32 = 30.0;
+const MAX_NOTCHES: u32 = 30;
+const NOTCH_GAP: f32 = 2.0;
+const VOLUME_HALF: f32 = BUTTON_STEP + 20.0;
+pub const OSD_WIDTH: f32 = 300.0;
+const OSD_HEIGHT: f32 = 48.0;
 
 #[derive(Clone, Copy)]
 pub struct Look {
@@ -182,6 +191,8 @@ enum Part {
     Toggle,
     Next,
     Bar,
+    Volume,
+    Speaker,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -203,6 +214,34 @@ struct Ui {
     hover: Option<Part>,
     pressed: Option<Part>,
     dragging: bool,
+    sliding: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Drag {
+    seek: Option<f32>,
+    volume: Option<f32>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct Level {
+    level: u32,
+    max: u32,
+    muted: bool,
+    fixed: bool,
+}
+
+impl Level {
+    fn fraction(self) -> f32 {
+        self.level as f32 / self.max as f32
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Layout {
+    Popup,
+    Window,
+    Osd,
 }
 
 #[derive(Clone)]
@@ -225,6 +264,7 @@ struct Playing {
     can_toggle: bool,
     can_seek: bool,
     art: Option<Arc<[u8]>>,
+    volume: Option<Level>,
 }
 
 impl Content {
@@ -270,6 +310,15 @@ impl Content {
             can_toggle: player.can(toggle) || player.can("playPause"),
             can_seek: player.can("seek") && !duration.is_zero(),
             art: status.art.clone(),
+            volume: player
+                .volume
+                .filter(|_| player.volume_max > 0)
+                .map(|level| Level {
+                    level: level.min(player.volume_max),
+                    max: player.volume_max,
+                    muted: player.muted,
+                    fixed: player.volume_fixed,
+                }),
         })
     }
 
@@ -299,9 +348,19 @@ struct Progress {
     seekable: bool,
 }
 
+struct VolumeRow {
+    bar: D2D_RECT_F,
+    fraction: f32,
+    notches: u32,
+    muted: bool,
+    enabled: bool,
+    speaker: Vector2,
+}
+
 #[derive(Clone, Copy)]
 enum Frame {
     Natural,
+    Osd,
     Preview { width: f32, height: f32 },
     Fixed { width: f32, height: f32 },
 }
@@ -310,6 +369,7 @@ impl Frame {
     fn width(self) -> f32 {
         match self {
             Frame::Natural => WIDTH,
+            Frame::Osd => OSD_WIDTH,
             Frame::Preview { width, .. } | Frame::Fixed { width, .. } => width,
         }
     }
@@ -322,6 +382,7 @@ struct Scene {
     texts: Vec<Text>,
     progress: Option<Progress>,
     controls: Vec<Control>,
+    volume: Option<VolumeRow>,
     playing: bool,
 }
 
@@ -340,6 +401,10 @@ struct Resources {
     previous: ID2D1PathGeometry,
     next: ID2D1PathGeometry,
     round: ID2D1StrokeStyle,
+    speaker: ID2D1PathGeometry,
+    wave_low: ID2D1PathGeometry,
+    wave_high: ID2D1PathGeometry,
+    cross: ID2D1PathGeometry,
 }
 
 impl Resources {
@@ -388,6 +453,26 @@ impl Resources {
                 sink.Close()?;
                 Result::Ok(path)
             };
+            let stroke = |figures: &[Vec<(f32, f32)>]| {
+                let path = factory.CreatePathGeometry()?;
+                let sink = path.Open()?;
+                for figure in figures {
+                    let points: Vec<Vector2> = figure.iter().map(|&(x, y)| v(x, y)).collect();
+                    sink.BeginFigure(points[0], D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink.AddLines(&points[1..]);
+                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                }
+                sink.Close()?;
+                Result::Ok(path)
+            };
+            let arc = |radius: f32| -> Vec<(f32, f32)> {
+                (0..=8)
+                    .map(|step| {
+                        let angle = (-45.0 + 11.25 * step as f32).to_radians();
+                        (radius * angle.cos(), radius * angle.sin())
+                    })
+                    .collect()
+            };
             let round = factory.CreateStrokeStyle(
                 &D2D1_STROKE_STYLE_PROPERTIES {
                     startCap: D2D1_CAP_STYLE_ROUND,
@@ -416,6 +501,17 @@ impl Resources {
                     &[(5.0, -6.0), (7.0, -6.0), (7.0, 6.0), (5.0, 6.0)],
                     &[(-6.0, -6.0), (-6.0, 6.0), (3.0, 0.0)],
                 ])?,
+                speaker: shape(&[&[
+                    (-7.0, -2.5),
+                    (-4.0, -2.5),
+                    (0.0, -6.0),
+                    (0.0, 6.0),
+                    (-4.0, 2.5),
+                    (-7.0, 2.5),
+                ]])?,
+                wave_low: stroke(&[arc(3.5)])?,
+                wave_high: stroke(&[arc(7.0)])?,
+                cross: stroke(&[vec![(3.0, -2.5), (8.0, 2.5)], vec![(3.0, 2.5), (8.0, -2.5)]])?,
                 round,
                 factory,
                 write,
@@ -445,7 +541,7 @@ impl Resources {
         ))
     }
 
-    fn scene(&self, content: &Content, frame: Frame, drag: Option<f32>) -> Result<Scene> {
+    fn scene(&self, content: &Content, frame: Frame, drag: Drag) -> Result<Scene> {
         match content {
             Content::Offline(line) => {
                 self.compact(Picture::Disconnected, "Телефон не подключён", line, frame)
@@ -456,8 +552,69 @@ impl Resources {
             Content::Playing(playing) if let Frame::Preview { width, height } = frame => {
                 self.thumbnail(playing, width, height)
             }
+            Content::Playing(playing) if matches!(frame, Frame::Osd) => self.osd(playing, drag),
             Content::Playing(playing) => self.player(playing, frame, drag),
         }
+    }
+
+    fn volume_row(
+        &self,
+        level: Level,
+        drag: Option<f32>,
+        (left, right, middle): (f32, f32, f32),
+        texts: &mut Vec<Text>,
+    ) -> Result<VolumeRow> {
+        let fraction = drag.unwrap_or(level.fraction()).clamp(0.0, 1.0);
+        let steps = (fraction * level.max as f32).round();
+        let percent = (steps * 100.0 / level.max as f32).round() as u32;
+        let notched = level.max <= MAX_NOTCHES;
+        let fraction = if notched {
+            steps / level.max as f32
+        } else {
+            fraction
+        };
+        let (layout, _, height) = self.text(&percent.to_string(), &self.small, 40.0, 20.0)?;
+        texts.push(Text {
+            layout,
+            at: v(right + 10.0, middle - height / 2.0),
+            tone: Tone::Tertiary,
+        });
+        Ok(VolumeRow {
+            bar: D2D_RECT_F {
+                left,
+                top: middle - 2.0,
+                right,
+                bottom: middle + 2.0,
+            },
+            fraction,
+            notches: if notched { level.max } else { 0 },
+            muted: level.muted && drag.is_none(),
+            enabled: !level.fixed,
+            speaker: v(left - 22.0, middle),
+        })
+    }
+
+    fn osd(&self, playing: &Playing, drag: Drag) -> Result<Scene> {
+        let mut texts = Vec::new();
+        let volume = match playing.volume {
+            Some(level) => Some(self.volume_row(
+                level,
+                drag.volume,
+                (80.0, OSD_WIDTH - 50.0, OSD_HEIGHT / 2.0),
+                &mut texts,
+            )?),
+            None => None,
+        };
+        Ok(Scene {
+            width: OSD_WIDTH,
+            height: OSD_HEIGHT,
+            picture: (Picture::Connected, rect(14.0, 12.0, 24.0, 24.0)),
+            texts,
+            progress: None,
+            controls: Vec::new(),
+            volume,
+            playing: playing.playing,
+        })
     }
 
     fn thumbnail(&self, playing: &Playing, width: f32, height: f32) -> Result<Scene> {
@@ -511,6 +668,7 @@ impl Resources {
             texts,
             progress,
             controls: Vec::new(),
+            volume: None,
             playing: playing.playing,
         })
     }
@@ -524,7 +682,7 @@ impl Resources {
         let block = title_height + 2.0 + line_height;
         let content = block.max(ICON);
         let height = match frame {
-            Frame::Natural => PAD * 2.0 + content,
+            Frame::Natural | Frame::Osd => PAD * 2.0 + content,
             Frame::Preview { height, .. } | Frame::Fixed { height, .. } => height,
         };
         let top = (height - content) / 2.0;
@@ -547,6 +705,7 @@ impl Resources {
             ],
             progress: None,
             controls: Vec::new(),
+            volume: None,
             playing: false,
         })
     }
@@ -581,12 +740,16 @@ impl Resources {
         Ok((measured, block))
     }
 
-    fn player(&self, playing: &Playing, frame: Frame, drag: Option<f32>) -> Result<Scene> {
+    fn player(&self, playing: &Playing, frame: Frame, drag: Drag) -> Result<Scene> {
         let width = frame.width();
         let below = if playing.duration.is_zero() {
             54.0
         } else {
             80.0
+        } + if playing.volume.is_some() {
+            VOLUME_ROW
+        } else {
+            0.0
         };
         let lines = self.lines(playing);
         let mut texts = Vec::new();
@@ -600,8 +763,8 @@ impl Resources {
                 y += height + 2.0;
             }
         };
-        let (art, mut bottom, height) = match frame {
-            Frame::Natural | Frame::Preview { .. } => {
+        let (art, bottom, height) = match frame {
+            Frame::Natural | Frame::Osd | Frame::Preview { .. } => {
                 let x = PAD + ART + 12.0;
                 let (measured, block) = self.measure(&lines, width - x - PAD, false)?;
                 stack(measured, x, PAD + ((ART - block) / 2.0).max(0.0));
@@ -632,11 +795,12 @@ impl Resources {
             }
         };
 
+        let buttons = bottom + CONTROLS_GAP;
         let mut progress = None;
         if !playing.duration.is_zero() {
             let natural = playing.position.as_secs_f32() / playing.duration.as_secs_f32();
-            let fraction = drag.unwrap_or(natural).clamp(0.0, 1.0);
-            let shown = match drag {
+            let fraction = drag.seek.unwrap_or(natural).clamp(0.0, 1.0);
+            let shown = match drag.seek {
                 Some(_) => playing.duration.mul_f32(fraction),
                 None => playing.position,
             };
@@ -646,7 +810,7 @@ impl Resources {
             let (right, right_width, _) =
                 self.text(&clock(playing.duration, long), &self.small, 100.0, 20.0)?;
             let slot = left_width.max(right_width);
-            let middle = bottom + 20.0;
+            let middle = buttons + PROGRESS_GAP;
             texts.push(Text {
                 layout: left,
                 at: v(PAD, middle - label_height / 2.0),
@@ -667,11 +831,9 @@ impl Resources {
                 fraction,
                 seekable: playing.can_seek,
             });
-            bottom = middle + 8.0;
         }
 
-        let row = bottom + if progress.is_some() { 6.0 } else { 8.0 };
-        let middle = row + 18.0;
+        let middle = buttons;
         let controls = vec![
             Control {
                 part: Part::Previous,
@@ -689,6 +851,19 @@ impl Resources {
                 enabled: playing.can_next,
             },
         ];
+        let volume = match playing.volume {
+            Some(level) => Some(self.volume_row(
+                level,
+                drag.volume,
+                (
+                    width / 2.0 - VOLUME_HALF,
+                    width / 2.0 + VOLUME_HALF,
+                    height - VOLUME_ROW,
+                ),
+                &mut texts,
+            )?),
+            None => None,
+        };
         Ok(Scene {
             width,
             height,
@@ -696,6 +871,7 @@ impl Resources {
             texts,
             progress,
             controls,
+            volume,
             playing: playing.playing,
         })
     }
@@ -774,12 +950,93 @@ impl Resources {
                     Part::Next => &self.next,
                     Part::Toggle if scene.playing => &self.pause,
                     Part::Toggle => &self.play,
-                    Part::Bar => continue,
+                    Part::Bar | Part::Volume | Part::Speaker => continue,
                 };
                 target.SetTransform(&Matrix3x2::translation(c.X, c.Y));
                 target.FillGeometry(shape, &brush, None);
                 target.DrawGeometry(shape, &brush, 2.0, &self.round);
                 target.SetTransform(&Matrix3x2::identity());
+            }
+
+            if let Some(volume) = &scene.volume {
+                let c = volume.speaker;
+                if volume.enabled && ui.hover == Some(Part::Speaker) {
+                    brush.SetColor(if ui.pressed == Some(Part::Speaker) {
+                        &palette.pressed
+                    } else {
+                        &palette.subtle
+                    });
+                    target.FillRoundedRectangle(
+                        &rounded(rect(c.X - 14.0, c.Y - 12.0, 28.0, 24.0), 4.0),
+                        &brush,
+                    );
+                }
+                brush.SetColor(if volume.enabled {
+                    &palette.text
+                } else {
+                    &palette.disabled
+                });
+                target.SetTransform(&Matrix3x2::translation(c.X, c.Y));
+                target.FillGeometry(&self.speaker, &brush, None);
+                target.DrawGeometry(&self.speaker, &brush, 1.0, &self.round);
+                if volume.muted || volume.fraction <= 0.0 {
+                    target.DrawGeometry(&self.cross, &brush, 1.5, &self.round);
+                } else {
+                    target.DrawGeometry(&self.wave_low, &brush, 1.5, &self.round);
+                    if volume.fraction > 0.5 {
+                        target.DrawGeometry(&self.wave_high, &brush, 1.5, &self.round);
+                    }
+                }
+                target.SetTransform(&Matrix3x2::identity());
+
+                let bar = volume.bar;
+                let x = bar.left + (bar.right - bar.left) * volume.fraction;
+                let filled = if volume.muted || !volume.enabled {
+                    &palette.disabled
+                } else {
+                    &palette.accent
+                };
+                if volume.notches > 1 {
+                    let width = (bar.right - bar.left) / volume.notches as f32;
+                    for step in 0..volume.notches {
+                        let left = bar.left + width * step as f32;
+                        let segment = D2D_RECT_F {
+                            left: left + if step == 0 { 0.0 } else { NOTCH_GAP / 2.0 },
+                            right: left + width
+                                - if step + 1 == volume.notches {
+                                    0.0
+                                } else {
+                                    NOTCH_GAP / 2.0
+                                },
+                            ..bar
+                        };
+                        let on = left + width / 2.0 < x;
+                        brush.SetColor(if on { filled } else { &palette.rail });
+                        target.FillRoundedRectangle(&rounded(segment, 1.5), &brush);
+                    }
+                } else {
+                    brush.SetColor(&palette.rail);
+                    target.FillRoundedRectangle(&rounded(bar, 2.0), &brush);
+                    brush.SetColor(filled);
+                    target.FillRoundedRectangle(
+                        &rounded(D2D_RECT_F { right: x, ..bar }, 2.0),
+                        &brush,
+                    );
+                }
+                if volume.enabled {
+                    let middle = (bar.top + bar.bottom) / 2.0;
+                    let grown = ui.sliding || ui.hover == Some(Part::Volume);
+                    brush.SetColor(&palette.thumb);
+                    target.FillEllipse(&circle(x, middle, 8.0), &brush);
+                    brush.SetColor(&palette.edge);
+                    target.DrawEllipse(&circle(x, middle, 8.0), &brush, 1.0, None);
+                    brush.SetColor(if volume.muted {
+                        &palette.disabled
+                    } else {
+                        &palette.accent
+                    });
+                    target.FillEllipse(&circle(x, middle, if grown { 5.5 } else { 4.5 }), &brush);
+                }
             }
         }
         Ok(())
@@ -1036,6 +1293,64 @@ pub struct Transport {
     pub next: bool,
 }
 
+pub const VOLUME_HOLD: Duration = Duration::from_millis(1500);
+pub const VOLUME_RECHECK: Duration = Duration::from_millis(400);
+
+pub fn volume_step(max: u32) -> u32 {
+    ((max as f32) * 0.02).round().max(1.0) as u32
+}
+
+pub fn change_volume(status: &Mutex<Status>, events: &Sender<Event>, change: VolumeChange) {
+    let Ok(mut guard) = status.lock() else {
+        return;
+    };
+    let status = &mut *guard;
+    let target = status.volume_target;
+    let Some((player, _)) = status.player.as_mut() else {
+        return;
+    };
+    let (Some(current), max) = (player.volume, player.volume_max) else {
+        return;
+    };
+    let held = target
+        .filter(|target| target.at.elapsed() < VOLUME_HOLD && target.max == max)
+        .map(|target| target.level);
+    if max == 0 {
+        return;
+    }
+    let base = held.unwrap_or(current);
+    let level = match change {
+        VolumeChange::Set(value) => value.min(max),
+        VolumeChange::Up => (base + volume_step(max)).min(max),
+        VolumeChange::Down => base.saturating_sub(volume_step(max)),
+        VolumeChange::Mute => {
+            player.muted = !player.muted;
+            drop(guard);
+            let _ = events.send(Event::Volume(VolumeChange::Mute));
+            return;
+        }
+    };
+    if level > 0 {
+        player.muted = false;
+    }
+    player.volume = Some(level);
+    status.volume_target = Some(VolumeTarget {
+        level,
+        max,
+        at: Instant::now(),
+        repeated: false,
+    });
+    drop(guard);
+    let _ = events.send(Event::Volume(VolumeChange::Set(level)));
+}
+
+pub fn volume_controllable(status: &Status) -> bool {
+    status.connected
+        && status.player.as_ref().is_some_and(|(player, _)| {
+            player.volume.is_some() && player.volume_max > 0 && !player.volume_fixed
+        })
+}
+
 pub fn fit_height(width: f32) -> f32 {
     let room = width - 2.0 * PAD;
     let side = PAD + (room * SIDE_SHARE).min(ART_MAX) + FIT_BELOW;
@@ -1058,7 +1373,7 @@ pub struct View {
     backdrop: bool,
     acrylic: Option<bool>,
     fade_window: bool,
-    fixed: bool,
+    layout: Layout,
     pub look: Look,
     target: Option<ID2D1DCRenderTarget>,
     images: Images,
@@ -1066,6 +1381,10 @@ pub struct View {
     pub scale: f32,
     ui: Ui,
     drag: Option<f32>,
+    volume_drag: Option<f32>,
+    volume_sent: Option<u32>,
+    volume_sent_at: Option<Instant>,
+    wheel_rest: i32,
     pub opacity: f32,
     tracking: bool,
     report: Option<String>,
@@ -1077,9 +1396,9 @@ impl View {
         window: HWND,
         status: Arc<Mutex<Status>>,
         events: Sender<Event>,
-        fade_window: bool,
-        fixed: bool,
+        layout: Layout,
     ) -> Result<Self> {
+        let fade_window = layout != Layout::Window;
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let _ = BufferedPaintInit();
@@ -1099,7 +1418,7 @@ impl View {
             backdrop,
             acrylic: None,
             fade_window,
-            fixed,
+            layout,
             look,
             target: None,
             images: Images::default(),
@@ -1107,6 +1426,10 @@ impl View {
             scale: 1.0,
             ui: Ui::default(),
             drag: None,
+            volume_drag: None,
+            volume_sent: None,
+            volume_sent_at: None,
+            wheel_rest: 0,
             opacity: if fade_window { 0.0 } else { 1.0 },
             tracking: false,
             report: None,
@@ -1212,9 +1535,18 @@ impl View {
             .unwrap_or(Content::Offline(String::new()))
     }
 
+    fn drags(&self) -> Drag {
+        Drag {
+            seek: self.drag,
+            volume: self.volume_drag,
+        }
+    }
+
     fn frame(&self) -> Frame {
-        if !self.fixed {
-            return Frame::Natural;
+        match self.layout {
+            Layout::Popup => return Frame::Natural,
+            Layout::Osd => return Frame::Osd,
+            Layout::Window => {}
         }
         let mut client = RECT::default();
         let _ = unsafe { GetClientRect(self.window, &mut client) };
@@ -1228,7 +1560,7 @@ impl View {
         let content = self.content();
         let scene = self
             .resources
-            .scene(&content, self.frame(), self.drag)
+            .scene(&content, self.frame(), self.drags())
             .ok()?;
         let height = scene.height;
         self.scene = Some(scene);
@@ -1294,7 +1626,7 @@ impl View {
             return;
         }
         let content = self.content();
-        let Ok(scene) = self.resources.scene(&content, self.frame(), self.drag) else {
+        let Ok(scene) = self.resources.scene(&content, self.frame(), self.drags()) else {
             finish(false);
             return;
         };
@@ -1302,6 +1634,7 @@ impl View {
             .prepare(&self.resources, &target, self.scale, &scene, content.art());
         let ui = Ui {
             dragging: self.drag.is_some(),
+            sliding: self.volume_drag.is_some(),
             ..self.ui
         };
         let opacity = if self.layered() { 1.0 } else { self.opacity };
@@ -1349,6 +1682,19 @@ impl View {
                 return Some(control.part);
             }
         }
+        if let Some(volume) = &scene.volume
+            && volume.enabled
+        {
+            let c = volume.speaker;
+            if (x - c.X).abs() <= 14.0 && (y - c.Y).abs() <= 12.0 {
+                return Some(Part::Speaker);
+            }
+            let bar = volume.bar;
+            let middle = (bar.top + bar.bottom) / 2.0;
+            if x >= bar.left - 6.0 && x <= bar.right + 6.0 && (y - middle).abs() <= 8.0 {
+                return Some(Part::Volume);
+            }
+        }
         let progress = scene.progress.as_ref()?;
         let bar = progress.bar;
         let middle = (bar.top + bar.bottom) / 2.0;
@@ -1366,14 +1712,71 @@ impl View {
         Some(((x - bar.left) / (bar.right - bar.left)).clamp(0.0, 1.0))
     }
 
+    fn volume_fraction(&self, x: f32) -> Option<f32> {
+        let bar = self.scene.as_ref()?.volume.as_ref()?.bar;
+        Some(((x - bar.left) / (bar.right - bar.left)).clamp(0.0, 1.0))
+    }
+
+    fn slide(&mut self, last: bool) {
+        let Some(fraction) = self.volume_drag else {
+            return;
+        };
+        if !last
+            && self
+                .volume_sent_at
+                .is_some_and(|at| at.elapsed() < SLIDE_EVERY)
+        {
+            return;
+        }
+        let max = self
+            .status
+            .lock()
+            .ok()
+            .and_then(|status| status.player.as_ref().map(|(player, _)| player.volume_max))
+            .unwrap_or(0);
+        if max == 0 {
+            return;
+        }
+        let level = (fraction * max as f32).round() as u32;
+        if self.volume_sent != Some(level) {
+            self.volume_sent = Some(level);
+            self.volume_sent_at = Some(Instant::now());
+            change_volume(&self.status, &self.events, VolumeChange::Set(level));
+        }
+    }
+
+    pub fn wheel(&mut self, delta: i16) {
+        let controllable = self
+            .status
+            .lock()
+            .map(|status| volume_controllable(&status))
+            .unwrap_or(false);
+        if !controllable {
+            return;
+        }
+        self.wheel_rest += delta as i32;
+        while self.wheel_rest.abs() >= 120 {
+            let change = if self.wheel_rest > 0 {
+                VolumeChange::Up
+            } else {
+                VolumeChange::Down
+            };
+            self.wheel_rest -= 120 * self.wheel_rest.signum();
+            change_volume(&self.status, &self.events, change);
+        }
+        self.invalidate();
+    }
+
     pub fn busy(&self) -> bool {
-        self.ui.pressed.is_some() || self.drag.is_some()
+        self.ui.pressed.is_some() || self.drag.is_some() || self.volume_drag.is_some()
     }
 
     pub fn reset(&mut self) {
         let captured = self.busy();
         self.ui = Ui::default();
         self.drag = None;
+        self.volume_drag = None;
+        self.volume_sent = None;
         if captured {
             unsafe {
                 let _ = ReleaseCapture();
@@ -1405,6 +1808,12 @@ impl View {
             self.invalidate();
             return;
         }
+        if self.volume_drag.is_some() {
+            self.volume_drag = self.volume_fraction(point.0);
+            self.slide(false);
+            self.invalidate();
+            return;
+        }
         let hover = self.hit(point);
         if hover != self.ui.hover {
             self.ui.hover = hover;
@@ -1421,6 +1830,12 @@ impl View {
         let point = self.point(lparam);
         match self.hit(point) {
             Some(Part::Bar) => self.drag = self.fraction(point.0),
+            Some(Part::Volume) => {
+                self.volume_sent = None;
+                self.volume_sent_at = None;
+                self.volume_drag = self.volume_fraction(point.0);
+                self.slide(false);
+            }
             Some(part) => self.ui.pressed = Some(part),
             None => return,
         }
@@ -1433,7 +1848,14 @@ impl View {
         let point = self.point(lparam);
         let pressed = self.ui.pressed.take();
         let drag = self.drag.take();
-        if pressed.is_none() && drag.is_none() {
+        if self.volume_drag.is_some() {
+            self.volume_drag = self.volume_fraction(point.0);
+            self.slide(true);
+        }
+        let sliding = self.volume_drag.take().is_some();
+        self.volume_sent = None;
+        self.volume_sent_at = None;
+        if pressed.is_none() && drag.is_none() && !sliding {
             return;
         }
         unsafe {
@@ -1454,6 +1876,8 @@ impl View {
         if self.busy() {
             self.ui.pressed = None;
             self.drag = None;
+            self.volume_drag = None;
+            self.volume_sent = None;
             self.invalidate();
         }
     }
@@ -1470,7 +1894,11 @@ impl View {
             Part::Next => Button::Next,
             Part::Toggle if playing => Button::Pause,
             Part::Toggle => Button::Play,
-            Part::Bar => return,
+            Part::Speaker => {
+                change_volume(&self.status, &self.events, VolumeChange::Mute);
+                return;
+            }
+            Part::Bar | Part::Volume => return,
         };
         let _ = self.events.send(Event::Button(button));
     }
@@ -1508,7 +1936,7 @@ impl View {
             width: box_width / scale,
             height: box_height / scale,
         };
-        let Ok(scene) = self.resources.scene(&content, frame, None) else {
+        let Ok(scene) = self.resources.scene(&content, frame, Drag::default()) else {
             return;
         };
         let bitmap = match self.snapshot(&content, &scene, scale) {
@@ -1534,7 +1962,10 @@ impl View {
 
     pub fn send_preview(&self) {
         let content = self.content();
-        let Ok(scene) = self.resources.scene(&content, self.frame(), None) else {
+        let Ok(scene) = self
+            .resources
+            .scene(&content, self.frame(), Drag::default())
+        else {
             return;
         };
         match self.snapshot(&content, &scene, self.scale) {
@@ -1884,10 +2315,10 @@ mod tests {
 
     #[test]
     fn height_follows_cover() {
-        assert_eq!(fit_height(720.0), 16.0 + 344.0 + 80.0);
-        assert_eq!(fit_height(300.0), 16.0 + 268.0 + 12.0 + 58.0 + 8.0 + 80.0);
-        assert_eq!(fit_height(1200.0), 16.0 + 480.0 + 80.0);
-        assert_eq!(tallest(), 16.0 + 480.0 + 12.0 + 58.0 + 8.0 + 80.0);
+        assert_eq!(fit_height(720.0), 16.0 + 344.0 + 100.0);
+        assert_eq!(fit_height(300.0), 16.0 + 268.0 + 12.0 + 58.0 + 8.0 + 100.0);
+        assert_eq!(fit_height(1200.0), 16.0 + 480.0 + 100.0);
+        assert_eq!(tallest(), 16.0 + 480.0 + 12.0 + 58.0 + 8.0 + 100.0);
     }
 
     #[test]
@@ -1914,6 +2345,21 @@ mod tests {
             can_toggle: true,
             can_seek: true,
             art,
+            volume: Some(Level {
+                level: 9,
+                max: 15,
+                muted: false,
+                fixed: false,
+            }),
+        };
+        let fine = Playing {
+            volume: Some(Level {
+                level: 104,
+                max: 150,
+                muted: false,
+                fixed: false,
+            }),
+            ..playing.clone()
         };
         let paused = Playing {
             title: "Очень длинное название трека, которое точно не поместится в одну строку"
@@ -1926,6 +2372,12 @@ mod tests {
             can_previous: false,
             can_seek: false,
             art: None,
+            volume: Some(Level {
+                level: 4,
+                max: 15,
+                muted: true,
+                fixed: false,
+            }),
             ..playing.clone()
         };
         let hover = Ui {
@@ -2009,6 +2461,20 @@ mod tests {
                 fixed(260.0, 150.0),
             ),
             (
+                "fine",
+                false,
+                Content::Playing(fine),
+                Ui::default(),
+                Frame::Natural,
+            ),
+            (
+                "osd",
+                true,
+                Content::Playing(playing.clone()),
+                Ui::default(),
+                Frame::Osd,
+            ),
+            (
                 "thumbnail",
                 false,
                 Content::Playing(playing),
@@ -2035,7 +2501,7 @@ mod tests {
             animated: true,
         };
         for (name, light, content, ui, frame) in cases.into_iter().chain(windows) {
-            let scene = resources.scene(&content, frame, None)?;
+            let scene = resources.scene(&content, frame, Drag::default())?;
             let width = (scene.width * scale).round() as u32;
             let height = (scene.height * scale).round() as u32;
             unsafe {
