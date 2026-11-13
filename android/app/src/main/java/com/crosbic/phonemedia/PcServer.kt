@@ -116,7 +116,11 @@ class PcServer(
                 } catch (_: JSONException) {
                     null
                 }
-                if (command != null) main.post { onCommand(command) }
+                when {
+                    command == null -> {}
+                    command.optString("type") == "ping" -> sender.execute { reply(pc, PING) }
+                    else -> main.post { onCommand(command) }
+                }
             }
         } catch (_: Exception) {
         } finally {
@@ -133,6 +137,18 @@ class PcServer(
     private fun publishConnected() {
         val pcs = clients.values.distinctBy { it.id }.sortedBy { it.name }
         main.post { if (running) AppState.connectedPcs = pcs }
+    }
+
+    private fun reply(pc: Socket, line: String) {
+        val connection = connections.firstOrNull { it.socket === pc } ?: return
+        try {
+            connection.writer.write(line)
+            connection.writer.write("\n")
+            connection.writer.flush()
+        } catch (_: IOException) {
+            connection.socket.close()
+            connections.remove(connection)
+        }
     }
 
     private fun write(line: String) {

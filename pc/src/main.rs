@@ -65,6 +65,7 @@ pub enum Event {
     CancelPairing,
     CheckUpdates,
     Restart(PathBuf),
+    KeepAlive,
     Quit,
 }
 
@@ -113,6 +114,17 @@ fn main() -> windows::core::Result<()> {
     phone::spawn(events.clone(), pairing.clone());
     if cfg!(not(debug_assertions)) {
         update::spawn(events.clone());
+    }
+    {
+        let events = events.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(phone::PING_EVERY);
+                if events.send(Event::KeepAlive).is_err() {
+                    return;
+                }
+            }
+        });
     }
     let searching = |pairing: &AtomicBool| {
         if pairing.load(Ordering::Relaxed) {
@@ -225,6 +237,12 @@ fn main() -> windows::core::Result<()> {
                 flyout.hide()
             }
             Event::Message(PhoneMessage::Ping) => Ok(()),
+            Event::KeepAlive => {
+                if link.is_some() {
+                    send(&mut link, json!({ "type": "ping" }));
+                }
+                Ok(())
+            }
             Event::Button(button) => {
                 if let Some(action) = action_for(button) {
                     log(format!("кнопка: {action}"));
@@ -256,7 +274,7 @@ fn main() -> windows::core::Result<()> {
             Event::PairNew => {
                 log("сопряжение нового телефона: откройте на нём приложение Phone Media");
                 pairing.store(true, Ordering::Relaxed);
-                if let Some(stream) = &link {
+                if let Some(stream) = link.take() {
                     let _ = stream.shutdown(Shutdown::Both);
                 }
                 tray.update(|status| status.phone = WAITING_FOR_NEW.to_string());
@@ -330,7 +348,8 @@ fn send(link: &mut Option<TcpStream>, message: serde_json::Value) {
         return;
     };
     if let Err(error) = stream.write_all(format!("{message}\n").as_bytes()) {
-        log(format!("не удалось отправить команду: {error}"));
+        log(format!("не удалось отправить телефону: {error}"));
+        let _ = stream.shutdown(Shutdown::Both);
         *link = None;
     }
 }
@@ -363,6 +382,9 @@ pub fn log(message: impl AsRef<str>) {
         message.as_ref()
     );
     println!("{line}");
+    if cfg!(test) {
+        return;
+    }
     let file = FILE.get_or_init(|| {
         let path = log_path();
         fs::create_dir_all(path.parent()?).ok()?;

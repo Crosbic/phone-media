@@ -1,12 +1,13 @@
 use std::collections::{BTreeSet, HashSet};
 use std::io::{self, BufRead, BufReader};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use if_addrs::{IfAddr, Ifv4Addr};
 use serde::Deserialize;
 
 use crate::pairing::{Failure, Pairings};
@@ -16,7 +17,11 @@ const DISCOVERY_PORT: u16 = 47800;
 const QUERY: &str = "PHONEMEDIA? 2";
 const ANSWER: &str = "PHONEMEDIA! 2";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const SILENCE_LIMIT: Duration = Duration::from_secs(25);
+pub const PING_EVERY: Duration = Duration::from_secs(10);
+const SILENCE_LIMIT: Duration = Duration::from_secs(PING_EVERY.as_secs() * 5 / 2);
+const _: () = assert!(SILENCE_LIMIT.as_secs() > 2 * PING_EVERY.as_secs());
+const UNICAST_EAGER: Duration = Duration::from_secs(120);
+const UNICAST_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -62,6 +67,7 @@ pub fn spawn(events: Sender<Event>, pairing: Arc<AtomicBool>) {
         let mut declined = HashSet::new();
         let mut was_pairing = false;
         let mut last_error = String::new();
+        let mut unicast = Unicast::new(Instant::now());
         loop {
             let pairing_now = pairing.load(Ordering::Relaxed);
             if pairing_now && !was_pairing {
@@ -69,16 +75,29 @@ pub fn spawn(events: Sender<Event>, pairing: Arc<AtomicBool>) {
             }
             was_pairing = pairing_now;
 
-            let phone = discover(|id| {
-                if pairing.load(Ordering::Relaxed) {
-                    !pairings.knows(id) && !declined.contains(id)
-                } else {
-                    pairings.knows(id) || (!pairings.has_any() && !declined.contains(id))
-                }
-            });
+            let phone = discover(
+                |networks| {
+                    let known = if pairing.load(Ordering::Relaxed) {
+                        Vec::new()
+                    } else {
+                        pairings.addresses()
+                    };
+                    unicast.select(Instant::now(), networks, known)
+                },
+                |id| {
+                    if pairing.load(Ordering::Relaxed) {
+                        !pairings.knows(id) && !declined.contains(id)
+                    } else {
+                        pairings.knows(id) || (!pairings.has_any() && !declined.contains(id))
+                    }
+                },
+            );
             match connect(&phone, &mut pairings, pairing.load(Ordering::Relaxed)) {
                 Ok((reader, link, paired)) => {
                     last_error.clear();
+                    if let IpAddr::V4(address) = phone.address.ip() {
+                        pairings.remember(&phone.id, address);
+                    }
                     if paired {
                         pairing.store(false, Ordering::Relaxed);
                     }
@@ -91,6 +110,7 @@ pub fn spawn(events: Sender<Event>, pairing: Arc<AtomicBool>) {
                         return;
                     }
                     read_messages(reader, &events);
+                    unicast = Unicast::new(Instant::now());
                     if events.send(Event::Disconnected).is_err() {
                         return;
                     }
@@ -123,12 +143,16 @@ fn connect(
     let mut stream =
         TcpStream::connect_timeout(&phone.address, Duration::from_secs(3)).map_err(link)?;
     let _ = stream.set_nodelay(true);
-    stream
+    let mut reader = BufReader::new(stream.try_clone().map_err(link)?);
+    reader
+        .get_ref()
         .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
         .map_err(link)?;
-    let mut reader = BufReader::new(stream.try_clone().map_err(link)?);
     let paired = pairings.authenticate(&mut reader, &mut stream, &phone.name, pair_new)?;
-    stream.set_read_timeout(Some(SILENCE_LIMIT)).map_err(link)?;
+    reader
+        .get_ref()
+        .set_read_timeout(Some(SILENCE_LIMIT))
+        .map_err(link)?;
     Ok((reader, stream, paired))
 }
 
@@ -164,9 +188,67 @@ fn read_messages(reader: BufReader<TcpStream>, events: &Sender<Event>) {
     }
 }
 
-fn discover(accept: impl Fn(&str) -> bool) -> Found {
+struct Unicast {
+    since: Instant,
+    last: Option<Instant>,
+    networks: BTreeSet<(Ipv4Addr, u8)>,
+}
+
+impl Unicast {
+    fn new(now: Instant) -> Self {
+        Self {
+            since: now,
+            last: None,
+            networks: BTreeSet::new(),
+        }
+    }
+
+    fn select(
+        &mut self,
+        now: Instant,
+        networks: &[Ifv4Addr],
+        known: Vec<Ipv4Addr>,
+    ) -> Vec<Ipv4Addr> {
+        let current: BTreeSet<_> = networks
+            .iter()
+            .map(|network| (network.ip, network.prefixlen))
+            .collect();
+        if current != self.networks {
+            *self = Self {
+                networks: current,
+                ..Self::new(now)
+            };
+        }
+        let reachable: Vec<Ipv4Addr> = known
+            .into_iter()
+            .filter(|&address| networks.iter().any(|network| inside(network, address)))
+            .collect();
+        if reachable.is_empty() || !self.due(now) {
+            return Vec::new();
+        }
+        reachable
+    }
+
+    fn due(&mut self, now: Instant) -> bool {
+        let due = now.duration_since(self.since) < UNICAST_EAGER
+            || self
+                .last
+                .is_none_or(|last| now.duration_since(last) >= UNICAST_EVERY);
+        if due {
+            self.last = Some(now);
+        }
+        due
+    }
+}
+
+fn discover(
+    mut unicast: impl FnMut(&[Ifv4Addr]) -> Vec<Ipv4Addr>,
+    accept: impl Fn(&str) -> bool,
+) -> Found {
     loop {
-        match try_discover(&accept) {
+        let networks = networks();
+        let direct = unicast(&networks);
+        match try_discover(&targets(&networks, &direct), &accept) {
             Ok(Some(found)) => return found,
             Ok(None) => {}
             Err(error) => {
@@ -177,11 +259,14 @@ fn discover(accept: impl Fn(&str) -> bool) -> Found {
     }
 }
 
-fn try_discover(accept: &impl Fn(&str) -> bool) -> io::Result<Option<Found>> {
+fn try_discover(
+    targets: &BTreeSet<Ipv4Addr>,
+    accept: &impl Fn(&str) -> bool,
+) -> io::Result<Option<Found>> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-    for target in broadcast_addresses() {
+    for &target in targets {
         let _ = socket.send_to(QUERY.as_bytes(), (target, DISCOVERY_PORT));
     }
     let mut buffer = [0; 512];
@@ -224,15 +309,106 @@ fn parse_answer(data: &[u8], from: SocketAddr) -> Option<Found> {
     })
 }
 
-fn broadcast_addresses() -> BTreeSet<Ipv4Addr> {
+fn networks() -> Vec<Ifv4Addr> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|interface| match interface.addr {
+            IfAddr::V4(v4) if !v4.ip.is_loopback() => Some(v4),
+            _ => None,
+        })
+        .collect()
+}
+
+fn targets(networks: &[Ifv4Addr], direct: &[Ipv4Addr]) -> BTreeSet<Ipv4Addr> {
     let mut targets = BTreeSet::from([Ipv4Addr::BROADCAST]);
-    for interface in if_addrs::get_if_addrs().unwrap_or_default() {
-        if let if_addrs::IfAddr::V4(v4) = interface.addr
-            && !v4.ip.is_loopback()
-            && let Some(broadcast) = v4.broadcast
-        {
-            targets.insert(broadcast);
+    targets.extend(networks.iter().filter_map(|network| network.broadcast));
+    targets.extend(direct.iter().copied());
+    targets
+}
+
+fn inside(network: &Ifv4Addr, address: Ipv4Addr) -> bool {
+    let Some(mask) = u32::MAX.checked_shl(32 - u32::from(network.prefixlen.min(32))) else {
+        return false;
+    };
+    address.to_bits() & mask == network.ip.to_bits() & mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn network(ip: [u8; 4], prefix: u8) -> Ifv4Addr {
+        let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+        let ip = Ipv4Addr::from(ip);
+        Ifv4Addr {
+            ip,
+            netmask: Ipv4Addr::from_bits(mask),
+            prefixlen: prefix,
+            broadcast: Some(Ipv4Addr::from_bits(ip.to_bits() | !mask)),
         }
     }
-    targets
+
+    #[test]
+    fn unicast_only_inside_current_networks() {
+        let start = Instant::now();
+        let home = network([192, 168, 1, 220], 24);
+        let tunnel = network([10, 8, 0, 2], 32);
+        let phone = Ipv4Addr::new(192, 168, 1, 234);
+        let known = vec![phone, Ipv4Addr::new(10, 8, 0, 5), phone];
+        let networks = [home, tunnel];
+        let direct = Unicast::new(start).select(start, &networks, known.clone());
+        let expected = BTreeSet::from([
+            Ipv4Addr::BROADCAST,
+            Ipv4Addr::new(10, 8, 0, 2),
+            Ipv4Addr::new(192, 168, 1, 255),
+            phone,
+        ]);
+        assert_eq!(targets(&networks, &direct), expected);
+        let unknown_mask = Ifv4Addr {
+            netmask: Ipv4Addr::UNSPECIFIED,
+            prefixlen: 0,
+            ..network([192, 168, 1, 220], 24)
+        };
+        assert!(
+            Unicast::new(start)
+                .select(start, &[unknown_mask], known.clone())
+                .is_empty()
+        );
+        assert!(Unicast::new(start).select(start, &[], known).is_empty());
+    }
+
+    #[test]
+    fn unicast_backs_off_after_eager_period() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut unicast = Unicast::new(start);
+        assert!(unicast.due(at(0)));
+        assert!(unicast.due(at(118)));
+        assert!(!unicast.due(at(120)));
+        assert!(!unicast.due(at(147)));
+        assert!(unicast.due(at(148)));
+        assert!(!unicast.due(at(177)));
+        assert!(unicast.due(at(178)));
+        let mut late = Unicast::new(start);
+        assert!(late.due(at(200)));
+        assert!(!late.due(at(202)));
+    }
+
+    #[test]
+    fn unicast_restarts_on_network_change_and_skips_unreachable_rounds() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let home = [network([192, 168, 1, 220], 24)];
+        let phone = Ipv4Addr::new(192, 168, 1, 234);
+        let mut unicast = Unicast::new(start);
+        assert_eq!(unicast.select(at(0), &home, vec![phone]), vec![phone]);
+        assert_eq!(unicast.select(at(130), &home, vec![phone]), vec![phone]);
+        assert!(unicast.select(at(140), &home, vec![phone]).is_empty());
+        assert!(unicast.select(at(150), &home, Vec::new()).is_empty());
+        assert_eq!(unicast.select(at(160), &home, vec![phone]), vec![phone]);
+        assert!(unicast.select(at(170), &[], vec![phone]).is_empty());
+        assert_eq!(unicast.select(at(172), &home, vec![phone]), vec![phone]);
+        assert_eq!(unicast.select(at(174), &home, vec![phone]), vec![phone]);
+    }
 }
